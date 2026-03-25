@@ -1,5 +1,5 @@
 <?php
-function sanitize($data){
-    return htmlspecialchars(strip_tags(trim($data)));
+function sanitize($input) {
+    return htmlspecialchars(strip_tags(trim($input)));
 }
 ?>

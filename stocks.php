@@ -2,205 +2,189 @@
 session_start();
 include 'includes/db.php';
 
-// ===== SECURITY CHECK =====
-if(!isset($_SESSION['user']) || $_SESSION['user']['role'] !== 'admin'){
-    header("Location: ../login.php");
+/* SECURITY CHECK */
+if(!isset($_SESSION['user']) || ($_SESSION['user']['role'] ?? '') !== 'client'){
+    header("Location: ../home.php");
     exit();
 }
 
-// ===== SETTINGS =====
-$month = date('Y-m');
+$user = $_SESSION['user'];
+$branch_id   = $user['branch_id'];
+$branch_name = $user['branch_name'];
 
-// ===== FETCH OR INITIALIZE STOCK =====
-$stock_query = $conn->query("SELECT * FROM stocks WHERE month='$month' LIMIT 1");
-if($stock_query->num_rows === 0){
-    $conn->query("INSERT INTO stocks (month, big_trays, small_trays) VALUES ('$month', 200, 200)");
-    $stock_query = $conn->query("SELECT * FROM stocks WHERE month='$month' LIMIT 1");
-}
-$stock = $stock_query->fetch_assoc();
+/* FETCH INVENTORY */
+$stmt = $conn->prepare("SELECT * FROM inventory WHERE branch_id=?");
+$stmt->bind_param("i",$branch_id);
+$stmt->execute();
+$inventory = $stmt->get_result()->fetch_assoc();
 
-// ===== HANDLE ADDING BIG / SMALL TRAYS =====
-if($_SERVER['REQUEST_METHOD'] === 'POST'){
-    $add_big = intval($_POST['add_big_trays'] ?? 0);
-    $add_small = intval($_POST['add_small_trays'] ?? 0);
+$big_remaining   = $inventory['big_trays'] ?? 0;
+$small_remaining = $inventory['small_trays'] ?? 0;
+$loose_eggs      = $inventory['egg_pieces'] ?? 0;
 
-    if($add_big > 0 || $add_small > 0){
-        $stmt_update = $conn->prepare("UPDATE stocks SET big_trays = big_trays + ?, small_trays = small_trays + ? WHERE month = ?");
-        $stmt_update->bind_param("iis", $add_big, $add_small, $month);
-        $stmt_update->execute();
+/* FETCH SALES */
+$stmt_sales = $conn->prepare("
+SELECT SUM(big_trays_sold) AS big_sold, 
+       SUM(small_trays_sold) AS small_sold
+FROM sales WHERE branch_id=?
+");
+$stmt_sales->bind_param("i",$branch_id);
+$stmt_sales->execute();
+$sales_totals = $stmt_sales->get_result()->fetch_assoc();
+$total_big_sold   = $sales_totals['big_sold'] ?? 0;
+$total_small_sold = $sales_totals['small_sold'] ?? 0;
+
+/* FETCH RETURNS */
+$stmt_ret = $conn->prepare("
+SELECT SUM(big_trays) AS big_returned, 
+       SUM(small_trays) AS small_returned, 
+       SUM(egg_pieces) AS pieces_returned
+FROM returns WHERE branch_id=?
+");
+$stmt_ret->bind_param("i",$branch_id);
+$stmt_ret->execute();
+$return_totals = $stmt_ret->get_result()->fetch_assoc();
+
+$total_big_returned   = $return_totals['big_returned'] ?? 0;
+$total_small_returned = $return_totals['small_returned'] ?? 0;
+$total_pieces_returned = $return_totals['pieces_returned'] ?? 0;
+
+/* CALCULATE EGGS */
+$big_tray_eggs   = 12;
+$small_tray_eggs = 6;
+
+$eggs_sold =
+    ($total_big_sold * $big_tray_eggs) +
+    ($total_small_sold * $small_tray_eggs);
+
+$eggs_returned =
+    ($total_big_returned * $big_tray_eggs) +
+    ($total_small_returned * $small_tray_eggs) +
+    $total_pieces_returned;
+
+$total_eggs_remaining =
+    ($big_remaining * $big_tray_eggs) +
+    ($small_remaining * $small_tray_eggs) +
+    $loose_eggs;
+
+$low_big_trays   = $big_remaining <=5;
+$low_small_trays = $small_remaining <=5;
+
+/* CARD COLOR FUNCTION */
+function cardColor($value, $type='big') {
+    if($type==='big'){
+        if($value <= 5) return ['#ff4d4f','#fff'];   // red
+        if($value <= 10) return ['#ffd666','#000'];  // yellow
+        return ['#d1fae5','#2d6a4f'];                // green
+    } else { // small
+        if($value <= 5) return ['#ff4d4f','#fff'];
+        if($value <= 10) return ['#ffd666','#000'];
+        return ['#d1fae5','#2d6a4f'];
     }
-    header("Location: stocks.php");
-    exit();
 }
-
-// ===== CALCULATE TOTAL EGGS =====
-$big_trays = intval($stock['big_trays']);
-$small_trays = intval($stock['small_trays']);
-
-$total_big_eggs = $big_trays * 12;
-$total_small_eggs = $small_trays * 6;
-$total_eggs = $total_big_eggs + $total_small_eggs;
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Stock Management - Admin Panel</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stocks - <?php echo htmlspecialchars($branch_name); ?></title>
 <style>
+/* Your original styling */
 *{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',Verdana,Tahoma;}
-body{background:#e6f4ea;color:#2d6a4f;}
-.wrapper {display:flex; min-height:100vh; overflow:hidden;}
-.sidebar{width:240px;background:#38b000;color:#fff;padding:25px;display:flex;flex-direction:column;}
-.sidebar h2{text-align:center;font-size:1.8rem;margin-bottom:30px;font-weight:700;}
-.sidebar a{display:flex;align-items:center;gap:10px;padding:12px 18px;margin-bottom:10px;background:#2d6a4f;color:#fff;border-radius:10px;font-weight:600;text-decoration:none;transition:0.3s;text-align:left;}
-.sidebar a i{width:20px;text-align:center;}
-.sidebar a.active,.sidebar a:hover{background:#70d6ff;color:#000;}
-.sidebar .logout{background:#d90429;margin-top:auto;}
-.sidebar .logout:hover{background:#9b0a20;}
-.main-content{flex:1;padding:30px;overflow-y:auto;height:100vh;}
-.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:30px;}
-.header h1{font-size:2.2rem;color:#2d6a4f;}
-.header p{color:#52796f;font-size:1rem;margin-top:5px;}
-#darkToggle{padding:8px 15px;border:none;border-radius:6px;background:#334155;color:#fff;cursor:pointer;font-weight:600;transition:0.3s;}
-#darkToggle:hover{background:#1e293b;}
-.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px;margin-bottom:25px;}
-.dashboard-card{background:#fff;padding:25px;border-radius:15px;box-shadow:0 10px 25px rgba(0,0,0,0.08);text-align:center;transition:0.3s;}
-.dashboard-card:hover{transform:translateY(-5px);}
-.dashboard-card .icon{font-size:3rem;margin-bottom:15px;color:#d8b48f;}
-.dashboard-card h2{color:#2d6a4f;font-size:2rem;margin-bottom:8px;}
-.dashboard-card p{color:#52796f;font-weight:600;}
-.stock-table{width:100%;border-collapse:collapse;box-shadow:0 8px 20px rgba(0,0,0,0.1);border-radius:12px;overflow:hidden;margin-top:20px;}
-.stock-table th, .stock-table td{padding:12px;text-align:center;font-size:0.95rem;}
-.stock-table th{background:#38b000;color:#fff;font-weight:600;}
-.stock-table tbody tr:nth-child(even){background:#f6fbf7;}
-.stock-table tbody tr:hover{background:#e0f4e6;transition:0.2s;}
-.chart-card{grid-column:1/-1;}
-form input, form button{padding:12px;margin-bottom:10px;border-radius:10px;border:1px solid #ccc;font-size:1em;}
-form input{width:48%;margin-right:4%;}
-form input:last-child{margin-right:0;}
-form button{background:#38b000;color:#fff;border:none;font-weight:bold;cursor:pointer;transition:0.3s;}
-form button:hover{background:#2d6a4f;}
-@media(max-width:768px){.sidebar{width:100%;flex-direction:row;overflow-x:auto;height:auto;padding:15px;}.sidebar a{margin-right:8px;margin-bottom:0;}.main-content{padding:20px;}.dashboard-grid{grid-template-columns:1fr;}}
-body.dark{background:#121821;color:#e0e0e0;}
-body.dark .main-content,.body.dark .dashboard-card,.body.dark .chart-card{background-color:#1e293b;color:#e0e0e0;}
-body.dark .sidebar{background-color:#0f172a;}
-body.dark .sidebar a{color:#e0e0e0;}
-body.dark .sidebar a.active,body.dark .sidebar a:hover{background-color:#2563eb;color:#fff;}
-body.dark .dashboard-card .icon{color:#70d6ff;}
-body.dark h2{color:#e0e0e0;}
-body.dark p{color:#cbd5e1;}
-body.dark .stock-table th{background:#2563eb;color:#fff;}
-body.dark .stock-table tbody tr:nth-child(even){background:#1f2a40;}
-body.dark .stock-table tbody tr:hover{background:#334155;}
+body{background:#f0fdf4;display:flex;min-height:100vh;}
+.sidebar{width:220px;background:#38b000;color:#fff;height:100vh;position:fixed;left:0;top:0;display:flex;flex-direction:column;padding:20px;}
+.sidebar h2{margin-bottom:40px;font-size:1.5em;text-align:center;}
+.sidebar a{display:block;padding:12px 20px;margin-bottom:15px;background:#2d6a4f;border-radius:10px;color:#fff;text-decoration:none;font-weight:bold;transition:0.3s;}
+.sidebar a:hover{background:#70d6ff;color:#000;transform:translateX(5px);}
+.sidebar .logout{background:#d00000;margin-top:auto;}
+.sidebar .logout:hover{background:#9d0208;transform:translateX(5px);}
+.main-content{margin-left:220px;padding:30px;flex:1;}
+.card{background:#fff;border-radius:15px;padding:25px;box-shadow:0 8px 20px rgba(0,0,0,0.12);margin-bottom:25px;}
+.card h2{color:#2d6a4f;margin-bottom:20px;}
+.kpi-grid{display:flex;flex-wrap:wrap;gap:20px;}
+.kpi-box{flex:1 1 220px;padding:20px;border-radius:15px;text-align:center;box-shadow:0 4px 10px rgba(0,0,0,0.08);}
+.kpi-box h3{font-size:1.2em;margin-bottom:10px;}
+.kpi-box p{font-size:1.5em;font-weight:bold;margin-top:5px;}
+.kpi-green{background:#d1fae5;color:#2d6a4f;}
+.kpi-yellow{background:#fff3cd;color:#856404;}
+.kpi-red{background:#ffe5e5;color:#d00000;}
+.alert-box{background:#ffe5e5;color:#d00000;padding:15px;border-radius:12px;font-weight:bold;margin-bottom:15px;}
 </style>
 </head>
 <body>
-<div class="wrapper">
 
-<!-- Sidebar -->
 <div class="sidebar">
-    <h2>Admin Panel</h2>
-    <a href="dashboard.php"><i class="fas fa-tachometer-alt"></i> Dashboard</a>
-    <a href="branches.php"><i class="fas fa-store"></i> Branches</a>
-    <a href="deliveries.php"><i class="fas fa-truck"></i> Deliveries</a>
-    <a href="sales.php"><i class="fas fa-chart-line"></i> Sales Report</a>
-    <a href="reports.php"><i class="fas fa-file-alt"></i> Reports</a>
-    <a href="stocks.php" class="active"><i class="fas fa-boxes"></i> Stocks</a>
-    <a href="users.php"><i class="fas fa-users"></i> Users</a>
-    <a href="../home.php" class="logout"><i class="fas fa-sign-out-alt"></i> Logout</a>
+<h2>Dashboard</h2>
+<a href="dashboard.php">Home</a>
+<a href="add_deliveries.php">Add Deliveries</a>
+<a href="orders.php">Orders</a>
+<a href="stocks.php">Stocks</a>
+<a href="returns.php">Returns</a>
+<a href="profile.php">Profile</a>
+<a href="../home.php" class="logout">Logout</a>
 </div>
 
 <div class="main-content">
-    <div class="header">
-        <div>
-            <h1>Stock Management</h1>
-            <p>Current egg stock for the month <?= $month ?></p>
-        </div>
-        <button id="darkToggle">🌙 Dark Mode</button>
+
+<!-- KPI CARDS -->
+<div class="card">
+<h2>📊 Stocks & Sales Overview</h2>
+<div class="kpi-grid">
+    <!-- Remaining Stock -->
+    <div class="kpi-box kpi-green">
+        <h3>Big Trays Remaining</h3>
+        <p><?php echo $big_remaining; ?> Trays</p>
+        <small>(<?php echo $big_remaining * $big_tray_eggs; ?> Eggs)</small>
+    </div>
+    <div class="kpi-box kpi-green">
+        <h3>Small Trays Remaining</h3>
+        <p><?php echo $small_remaining; ?> Trays</p>
+        <small>(<?php echo $small_remaining * $small_tray_eggs; ?> Eggs)</small>
+    </div>
+    <div class="kpi-box kpi-green">
+        <h3>Loose Eggs Remaining</h3>
+        <p><?php echo $loose_eggs; ?> Eggs</p>
+    </div>
+    <div class="kpi-box kpi-green">
+        <h3>Total Eggs Remaining</h3>
+        <p><?php echo $total_eggs_remaining; ?> Eggs</p>
     </div>
 
-    <!-- Dashboard Cards -->
-    <div class="dashboard-grid">
-        <div class="dashboard-card">
-            <div class="icon"><i class="fas fa-egg"></i></div>
-            <h2><?= $big_trays ?></h2>
-            <p>Big Trays (12 eggs each)</p>
-        </div>
-        <div class="dashboard-card">
-            <div class="icon"><i class="fas fa-egg"></i></div>
-            <h2><?= $small_trays ?></h2>
-            <p>Small Trays (6 eggs each)</p>
-        </div>
-        <div class="dashboard-card">
-            <div class="icon"><i class="fas fa-egg"></i></div>
-            <h2><?= $total_eggs ?></h2>
-            <p>Total Eggs Available</p>
-        </div>
+    <!-- Sold Eggs -->
+    <div class="kpi-box kpi-yellow">
+        <h3>Total Eggs Sold</h3>
+        <p><?php echo $eggs_sold; ?> Eggs</p>
     </div>
 
-    <!-- Add Stock Form -->
-    <div class="dashboard-card">
-        <h2>Add Stock</h2>
-        <form method="post" style="display:flex; flex-wrap:wrap; gap:10px; justify-content:center;">
-            <input type="number" name="add_big_trays" placeholder="Add Big Trays (12 eggs each)" style="flex:1 1 45%;">
-            <input type="number" name="add_small_trays" placeholder="Add Small Trays (6 eggs each)" style="flex:1 1 45%;">
-            <button type="submit" style="flex:1 1 100%;">Add Stock</button>
-        </form>
+    <!-- Returned Eggs -->
+    <div class="kpi-box kpi-red">
+        <h3>Big Trays Returned</h3>
+        <p><?php echo $total_big_returned; ?> Trays</p>
+        <small>(<?php echo $total_big_returned * $big_tray_eggs; ?> Eggs)</small>
     </div>
-
-    <!-- Stock Table -->
-    <div class="dashboard-card chart-card">
-        <h2>Current Stock Details</h2>
-        <table class="stock-table">
-            <thead>
-                <tr>
-                    <th>Type</th>
-                    <th>Count</th>
-                    <th>Eggs</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td>Big Trays</td>
-                    <td><?= $big_trays ?></td>
-                    <td><?= $total_big_eggs ?></td>
-                </tr>
-                <tr>
-                    <td>Small Trays</td>
-                    <td><?= $small_trays ?></td>
-                    <td><?= $total_small_eggs ?></td>
-                </tr>
-                <tr>
-                    <td><strong>Total Eggs</strong></td>
-                    <td>-</td>
-                    <td><strong><?= $total_eggs ?></strong></td>
-                </tr>
-            </tbody>
-        </table>
+    <div class="kpi-box kpi-red">
+        <h3>Small Trays Returned</h3>
+        <p><?php echo $total_small_returned; ?> Trays</p>
+        <small>(<?php echo $total_small_returned * $small_tray_eggs; ?> Eggs)</small>
+    </div>
+    <div class="kpi-box kpi-red">
+        <h3>Loose Egg Pieces Returned</h3>
+        <p><?php echo $total_pieces_returned; ?> Eggs</p>
     </div>
 </div>
 </div>
 
-<script>
-const body = document.body;
-const darkToggle = document.getElementById("darkToggle");
-if(localStorage.getItem("darkMode") === "enabled") {
-    body.classList.add("dark");
-    darkToggle.textContent = "☀️ Light Mode";
-}
-darkToggle.addEventListener("click", () => {
-    body.classList.toggle("dark");
-    if(body.classList.contains("dark")){
-        localStorage.setItem("darkMode","enabled");
-        darkToggle.textContent = "☀️ Light Mode";
-    } else {
-        localStorage.setItem("darkMode","disabled");
-        darkToggle.textContent = "🌙 Dark Mode";
-    }
-});
-</script>
+<!-- Low Stock Alerts -->
+<?php if($low_big_trays || $low_small_trays): ?>
+<div class="card">
+<h2>⚠ Low Stock Alerts</h2>
+<?php if($low_big_trays): ?><div class="alert-box">Low Big Trays: Only <?php echo $big_remaining; ?> left!</div><?php endif; ?>
+<?php if($low_small_trays): ?><div class="alert-box">Low Small Trays: Only <?php echo $small_remaining; ?> left!</div><?php endif; ?>
+</div>
+<?php endif; ?>
+
+</div>
 </body>
 </html>
